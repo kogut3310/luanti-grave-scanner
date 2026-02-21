@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Luanti Grave Scanner</title>
+  <style>
+    :root {
+      --bg: #f5f5f5;
+      --panel: #ffffff;
+      --text: #111;
+      --muted: #666;
+      --border: #ddd;
+      --th-bg: #222;
+      --th-text: #fff;
+      --btn-bg: #1f6feb;
+      --btn-text: #fff;
+    }
+
+    body.theme-dark {
+      --bg: #0f1115;
+      --panel: #1a1f29;
+      --text: #e6edf3;
+      --muted: #9aa4b2;
+      --border: #313946;
+      --th-bg: #2b3240;
+      --th-text: #f1f5f9;
+      --btn-bg: #2f81f7;
+      --btn-text: #fff;
+    }
+
+    body {
+      font-family: Arial, sans-serif;
+      margin: 2rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.8rem;
+      margin-bottom: 1rem;
+      align-items: center;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.9rem;
+    }
+
+    button {
+      padding: 0.5rem 0.8rem;
+      border: none;
+      border-radius: 6px;
+      background: var(--btn-bg);
+      color: var(--btn-text);
+      cursor: pointer;
+    }
+
+    select, label { color: var(--text); }
+    .muted { color: var(--muted); }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      background: var(--panel);
+    }
+
+    th, td {
+      border: 1px solid var(--border);
+      padding: 0.6rem;
+      text-align: left;
+    }
+
+    th {
+      background: var(--th-bg);
+      color: var(--th-text);
+    }
+
+    footer { margin-top: 1.5rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>Luanti Grave Scanner</h1>
+
+  <div class="toolbar panel">
+    <button id="refreshIncBtn">Odśwież nowe wpisy</button>
+    <button id="refreshFullBtn">Pełny reskan logu</button>
+
+    <label for="playerFilter">Nick:</label>
+    <select id="playerFilter"></select>
+
+    <span>
+      Zakres czasu:
+      <label><input type="radio" name="timeRange" value="today"> dziś</label>
+      <label><input type="radio" name="timeRange" value="week"> tydzień</label>
+      <label><input type="radio" name="timeRange" value="month"> miesiąc</label>
+      <label><input type="radio" name="timeRange" value="all"> wszystko</label>
+    </span>
+
+    <label><input id="themeToggle" type="checkbox"> Tryb dark</label>
+  </div>
+
+  <p id="status" class="muted">Gotowe.</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Kiedy</th>
+        <th>Gracz</th>
+        <th>Współrzędne (x,y,z)</th>
+      </tr>
+    </thead>
+    <tbody id="rows">
+      <tr><td colspan="3" class="muted">Ładowanie...</td></tr>
+    </tbody>
+  </table>
+
+  <footer>Wersja aplikacji: <strong>v0.2</strong></footer>
+
+  <script>
+    const STORAGE_KEYS = {
+      player: 'graveScanner.player',
+      range: 'graveScanner.range',
+      theme: 'graveScanner.theme'
+    };
+
+    const rows = document.getElementById('rows');
+    const statusEl = document.getElementById('status');
+    const playerFilter = document.getElementById('playerFilter');
+    const themeToggle = document.getElementById('themeToggle');
+    let allEvents = [];
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+    function fmtTs(ts) {
+      const d = new Date(ts);
+      return Number.isNaN(d.getTime()) ? ts : d.toLocaleString('pl-PL');
+    }
+
+    function loadPreferences() {
+      const savedRange = localStorage.getItem(STORAGE_KEYS.range) || 'today';
+      const target = document.querySelector(`input[name="timeRange"][value="${savedRange}"]`) ||
+                     document.querySelector('input[name="timeRange"][value="today"]');
+      target.checked = true;
+
+      const savedTheme = localStorage.getItem(STORAGE_KEYS.theme) || 'light';
+      document.body.classList.toggle('theme-dark', savedTheme === 'dark');
+      themeToggle.checked = savedTheme === 'dark';
+    }
+
+    function saveRange(value) { localStorage.setItem(STORAGE_KEYS.range, value); }
+    function saveTheme(value) { localStorage.setItem(STORAGE_KEYS.theme, value); }
+
+    function getTimeRange() {
+      return document.querySelector('input[name="timeRange"]:checked')?.value || 'today';
+    }
+
+    function withinRange(ts, range) {
+      if (range === 'all') return true;
+      const d = new Date(ts);
+      const now = new Date();
+      if (range === 'today') {
+        return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+      }
+      const diffMs = now - d;
+      if (range === 'week') return diffMs <= 7 * 24 * 60 * 60 * 1000;
+      if (range === 'month') return diffMs <= 30 * 24 * 60 * 60 * 1000;
+      return true;
+    }
+
+    function rebuildPlayerOptions() {
+      const selected = localStorage.getItem(STORAGE_KEYS.player) || 'all';
+      const players = Array.from(new Set(allEvents.map(e => e.player))).sort((a, b) => a.localeCompare(b, 'pl'));
+      const options = ['<option value="all">wszyscy</option>', ...players.map(p => `<option value="${p}">${p}</option>`)];
+      playerFilter.innerHTML = options.join('');
+      if (players.includes(selected) || selected === 'all') {
+        playerFilter.value = selected;
+      } else {
+        playerFilter.value = 'all';
+      }
+    }
+
+    function renderTable() {
+      const selectedPlayer = playerFilter.value || 'all';
+      const range = getTimeRange();
+      const filtered = allEvents.filter(ev => (selectedPlayer === 'all' || ev.player === selectedPlayer) && withinRange(ev.timestamp, range));
+      if (filtered.length === 0) {
+        rows.innerHTML = '<tr><td colspan="3" class="muted">Brak danych dla aktualnych filtrów.</td></tr>';
+        return;
+      }
+      rows.innerHTML = filtered.map(item => `
+        <tr>
+          <td>${fmtTs(item.timestamp)}</td>
+          <td>${item.player}</td>
+          <td>(${item.x}, ${item.y}, ${item.z})</td>
+        </tr>
+      `).join('');
+    }
+
+    async function loadDeaths() {
+      const res = await fetch('/api/deaths', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      allEvents = await res.json();
+      rebuildPlayerOptions();
+      renderTable();
+    }
+
+    async function triggerRefresh(url, label) {
+      setStatus(label + '...');
+      try {
+        const res = await fetch(url, { method: 'POST' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const info = await res.json();
+        await loadDeaths();
+        setStatus(`Zakończono (${info.mode}): dodano ${info.added}, łącznie ${info.total}.`);
+      } catch (err) {
+        setStatus('Błąd odświeżania: ' + err.message);
+      }
+    }
+
+    document.getElementById('refreshIncBtn').addEventListener('click', () =>
+      triggerRefresh('/api/refresh/incremental', 'Trwa odświeżanie nowych wpisów')
+    );
+
+    document.getElementById('refreshFullBtn').addEventListener('click', () => {
+      if (!confirm('To wykona pełny skan od początku i nadpisze listę. Kontynuować?')) return;
+      triggerRefresh('/api/refresh/full', 'Trwa pełny reskan logu');
+    });
+
+    playerFilter.addEventListener('change', () => {
+      localStorage.setItem(STORAGE_KEYS.player, playerFilter.value);
+      renderTable();
+    });
+
+    document.querySelectorAll('input[name="timeRange"]').forEach(r => {
+      r.addEventListener('change', () => {
+        saveRange(r.value);
+        renderTable();
+      });
+    });
+
+    themeToggle.addEventListener('change', () => {
+      const theme = themeToggle.checked ? 'dark' : 'light';
+      document.body.classList.toggle('theme-dark', theme === 'dark');
+      saveTheme(theme);
+    });
+
+    loadPreferences();
+    loadDeaths().then(() => setStatus('Dane załadowane.')).catch(err => {
+      rows.innerHTML = `<tr><td colspan="3" class="muted">Błąd odczytu API: ${err.message}</td></tr>`;
+      setStatus('Błąd ładowania danych.');
+    });
+  </script>
+</body>
+</html>
