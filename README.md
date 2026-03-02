@@ -1,4 +1,4 @@
-# Luanti Grave Scanner
+# Luanti Grave Scanner (v0.2)
 
 Prosta aplikacja w **Go** do monitorowania logu serwera Luanti i wyłapywania wpisów o śmierci gracza, np.:
 
@@ -6,13 +6,43 @@ Prosta aplikacja w **Go** do monitorowania logu serwera Luanti i wyłapywania wp
 2025-12-05 14:59:55: ACTION[Server]: Mordor dies at (23,-29035,-22). Bones placed
 ```
 
-Aplikacja:
-- co określony interwał (domyślnie 5 minut) skanuje plik logu,
-- zaczyna kolejne skanowanie od poprzedniego offsetu (przyrostowo),
-- wykrywa przycięcie/rotację loga (gdy rozmiar pliku jest mniejszy niż zapamiętany offset) i resetuje offset,
-- zapisuje znalezione zdarzenia do osobnego pliku JSON,
-- udostępnia API `GET /api/deaths`,
-- serwuje prosty frontend HTML z tabelą (kto, kiedy, współrzędne) pod `GET /`.
+## Co robi aplikacja
+
+- parsuje wpisy śmierci (`dies at ... Bones placed`),
+- trzyma listę znalezionych zgonów w osobnym pliku `deaths.json`,
+- zapamiętuje offset odczytu (`scanner-state.json`) i odświeża przyrostowo,
+- wykrywa przycięcie/rotację logu (gdy rozmiar pliku jest mniejszy niż zapisany offset) i resetuje offset,
+- udostępnia API + prostą stronę HTML,
+- **nie skanuje okresowo** — odświeżenie wywołujesz ręcznie przez API lub przyciski w UI.
+- **nigdy nie czyści i nie modyfikuje oryginalnego `debug.txt`**; operacje czyszczenia/odbudowy dotyczą wyłącznie lokalnych danych aplikacji (`deaths.json`, `scanner-state.json`).
+
+## API
+
+### Odczyt danych
+
+- `GET /api/deaths` — lista zgonów (JSON, najnowsze na początku).
+- `GET /api/version` — wersja aplikacji.
+- `GET /healthz` — healthcheck.
+
+### Odświeżanie backendu
+
+- `POST /api/refresh/incremental` — odświeżenie od ostatniego offsetu.
+- `POST /api/refresh/full` — pełny skan od początku logu i odbudowa listy zgonów od zera.
+
+## Nazwy przycisków w UI
+
+W wersji v0.2 użyte zostały nazwy:
+- **Odśwież nowe wpisy**
+- **Pełny reskan logu**
+
+## Filtry i preferencje w UI
+
+UI oferuje:
+- filtr po nicku (dropdown),
+- zakres czasu (radio): `dziś` (domyślnie), `tydzień`, `miesiąc`, `wszystko`,
+- przełącznik motywu: `white` / `black` (light/dark).
+
+Wybrane ustawienia (nick, zakres czasu, motyw) zapisywane są po stronie przeglądarki w `localStorage`, dzięki czemu wracają przy kolejnej wizycie.
 
 ## Wymagania
 
@@ -25,59 +55,47 @@ Aplikacja:
 | `LOG_FILE_PATH` | ✅ | - | Ścieżka do pliku logu Luanti |
 | `DATA_DIR` | ❌ | `./data` | Katalog na dane aplikacji (`scanner-state.json`, `deaths.json`) |
 | `HTTP_ADDR` | ❌ | `:8080` | Adres HTTP aplikacji |
-| `SCAN_INTERVAL` | ❌ | `5m` | Interwał skanowania, format `time.ParseDuration` |
 
 ## Uruchomienie lokalne
 
 ```bash
 export LOG_FILE_PATH=/ścieżka/do/debug.txt
-export SCAN_INTERVAL=5m
 go run .
 ```
 
-Następnie:
-- API: `http://localhost:8080/api/deaths`
 - UI: `http://localhost:8080/`
+- API deaths: `http://localhost:8080/api/deaths`
 
-## Pliki danych
+## Testy
 
-Aplikacja tworzy w `DATA_DIR`:
-- `scanner-state.json` — ostatni offset odczytu logu,
-- `deaths.json` — lista wykrytych zgonów.
+Uruchom wszystkie testy:
+
+```bash
+go test ./...
+```
+
+Sprawdzenie builda:
+
+```bash
+go build ./...
+```
 
 ## Docker
 
-Przykładowy `Dockerfile`:
+Build obrazu:
 
-```Dockerfile
-FROM golang:1.22-alpine AS builder
-WORKDIR /app
-COPY go.mod .
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/luanti-grave-scanner .
-
-FROM alpine:3.20
-WORKDIR /app
-COPY --from=builder /out/luanti-grave-scanner /usr/local/bin/luanti-grave-scanner
-COPY web ./web
-RUN adduser -D appuser && mkdir -p /data && chown -R appuser:appuser /data
-USER appuser
-ENV DATA_DIR=/data
-EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/luanti-grave-scanner"]
+```bash
+docker build -t luanti-grave-scanner:latest .
 ```
 
-Przykładowe uruchomienie kontenera:
+Przykładowe uruchomienie:
 
 ```bash
 docker run -d \
   --name luanti-grave-scanner \
   -p 8080:8080 \
   -e LOG_FILE_PATH=/logs/debug.txt \
-  -e SCAN_INTERVAL=5m \
   -v /ścieżka/na/NAS/logs:/logs:ro \
   -v /ścieżka/na/NAS/luanti-grave-scanner-data:/data \
   luanti-grave-scanner:latest
 ```
-
-> W środowisku NAS wystarczy dodać ten image do Twojego projektu obok kontenera serwera Luanti oraz podmontować log serwera jako volume tylko do odczytu.
