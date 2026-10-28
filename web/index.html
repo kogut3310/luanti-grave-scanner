@@ -15,6 +15,9 @@
       --th-text: #fff;
       --btn-bg: #1f6feb;
       --btn-text: #fff;
+      --input-bg: #fff;
+      --active-row: #ffe1e1;
+      --collected-row: #dcf7df;
     }
 
     body.theme-dark {
@@ -27,6 +30,9 @@
       --th-text: #f1f5f9;
       --btn-bg: #2f81f7;
       --btn-text: #fff;
+      --input-bg: #252c38;
+      --active-row: #4a2529;
+      --collected-row: #203f2b;
     }
 
     body {
@@ -60,8 +66,19 @@
       cursor: pointer;
     }
 
-    select, label { color: var(--text); }
+    select {
+      color: var(--text);
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.35rem;
+    }
+
+    select option { color: var(--text); background: var(--input-bg); }
+    label { color: var(--text); }
     .muted { color: var(--muted); }
+    .show-all .grave-active { background: var(--active-row); }
+    .show-all .grave-collected { background: var(--collected-row); }
 
     table {
       border-collapse: collapse;
@@ -93,6 +110,8 @@
     <label for="playerFilter">Nick:</label>
     <select id="playerFilter"></select>
 
+    <label><input id="showCollected" type="checkbox"> Pokaż także podniesione groby</label>
+
     <span>
       Zakres czasu:
       <label><input type="radio" name="timeRange" value="today"> dziś</label>
@@ -112,10 +131,11 @@
         <th>Kiedy</th>
         <th>Gracz</th>
         <th>Współrzędne (x,y,z)</th>
+        <th>Podniesiony przez</th>
       </tr>
     </thead>
     <tbody id="rows">
-      <tr><td colspan="3" class="muted">Ładowanie...</td></tr>
+      <tr><td colspan="4" class="muted">Ładowanie...</td></tr>
     </tbody>
   </table>
 
@@ -125,13 +145,15 @@
     const STORAGE_KEYS = {
       player: 'graveScanner.player',
       range: 'graveScanner.range',
-      theme: 'graveScanner.theme'
+      theme: 'graveScanner.theme',
+      showCollected: 'graveScanner.showCollected'
     };
 
     const rows = document.getElementById('rows');
     const statusEl = document.getElementById('status');
     const playerFilter = document.getElementById('playerFilter');
     const themeToggle = document.getElementById('themeToggle');
+    const showCollected = document.getElementById('showCollected');
     let allEvents = [];
 
     function setStatus(msg) { statusEl.textContent = msg; }
@@ -149,6 +171,8 @@
       const savedTheme = localStorage.getItem(STORAGE_KEYS.theme) || 'light';
       document.body.classList.toggle('theme-dark', savedTheme === 'dark');
       themeToggle.checked = savedTheme === 'dark';
+
+      showCollected.checked = localStorage.getItem(STORAGE_KEYS.showCollected) === 'true';
     }
 
     function saveRange(value) { localStorage.setItem(STORAGE_KEYS.range, value); }
@@ -156,6 +180,11 @@
 
     function getTimeRange() {
       return document.querySelector('input[name="timeRange"]:checked')?.value || 'today';
+    }
+
+    function escapeHtml(value) {
+      const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+      return String(value ?? '').replace(/[&<>"']/g, ch => entities[ch]);
     }
 
     function withinRange(ts, range) {
@@ -174,7 +203,7 @@
     function rebuildPlayerOptions() {
       const selected = localStorage.getItem(STORAGE_KEYS.player) || 'all';
       const players = Array.from(new Set(allEvents.map(e => e.player))).sort((a, b) => a.localeCompare(b, 'pl'));
-      const options = ['<option value="all">wszyscy</option>', ...players.map(p => `<option value="${p}">${p}</option>`)];
+      const options = ['<option value="all">wszyscy</option>', ...players.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`)];
       playerFilter.innerHTML = options.join('');
       if (players.includes(selected) || selected === 'all') {
         playerFilter.value = selected;
@@ -186,16 +215,23 @@
     function renderTable() {
       const selectedPlayer = playerFilter.value || 'all';
       const range = getTimeRange();
-      const filtered = allEvents.filter(ev => (selectedPlayer === 'all' || ev.player === selectedPlayer) && withinRange(ev.timestamp, range));
+      const includeCollected = showCollected.checked;
+      document.querySelector('table').classList.toggle('show-all', includeCollected);
+      const filtered = allEvents.filter(ev =>
+        (includeCollected || !ev.collected) &&
+        (selectedPlayer === 'all' || ev.player === selectedPlayer) &&
+        withinRange(ev.timestamp, range)
+      );
       if (filtered.length === 0) {
-        rows.innerHTML = '<tr><td colspan="3" class="muted">Brak danych dla aktualnych filtrów.</td></tr>';
+        rows.innerHTML = '<tr><td colspan="4" class="muted">Brak danych dla aktualnych filtrów.</td></tr>';
         return;
       }
       rows.innerHTML = filtered.map(item => `
-        <tr>
+        <tr class="${item.collected ? 'grave-collected' : 'grave-active'}">
           <td>${fmtTs(item.timestamp)}</td>
-          <td>${item.player}</td>
+          <td>${escapeHtml(item.player)}</td>
           <td>(${item.x}, ${item.y}, ${item.z})</td>
+          <td>${item.collected ? escapeHtml(item.collected_by) : '—'}</td>
         </tr>
       `).join('');
     }
@@ -235,6 +271,11 @@
       renderTable();
     });
 
+    showCollected.addEventListener('change', () => {
+      localStorage.setItem(STORAGE_KEYS.showCollected, String(showCollected.checked));
+      renderTable();
+    });
+
     document.querySelectorAll('input[name="timeRange"]').forEach(r => {
       r.addEventListener('change', () => {
         saveRange(r.value);
@@ -250,7 +291,7 @@
 
     loadPreferences();
     loadDeaths().then(() => setStatus('Dane załadowane.')).catch(err => {
-      rows.innerHTML = `<tr><td colspan="3" class="muted">Błąd odczytu API: ${err.message}</td></tr>`;
+      rows.innerHTML = `<tr><td colspan="4" class="muted">Błąd odczytu API: ${escapeHtml(err.message)}</td></tr>`;
       setStatus('Błąd ładowania danych.');
     });
   </script>

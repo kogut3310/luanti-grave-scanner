@@ -24,19 +24,38 @@ const (
 	appVersion  = "v0.2"
 )
 
-var deathLinePattern = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}): ACTION\[Server\]: ([^ ]+) dies at \((-?[0-9]+),(-?[0-9]+),(-?[0-9]+)\)\. Bones placed$`)
+var (
+	deathLinePattern = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}): ACTION\[Server\]: ([^ ]+) dies at \((-?[0-9]+),(-?[0-9]+),(-?[0-9]+)\)\. Bones placed$`)
+	digLinePattern   = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}): ACTION\[Server\]: ([^ ]+) digs mcl_core:bone_block at \((-?[0-9]+),(-?[0-9]+),(-?[0-9]+)\)$`)
+)
 
 //go:embed web/index.html
 var webFS embed.FS
 
 type DeathEvent struct {
-	Timestamp  time.Time `json:"timestamp"`
-	Player     string    `json:"player"`
-	X          int       `json:"x"`
-	Y          int       `json:"y"`
-	Z          int       `json:"z"`
-	RawLine    string    `json:"raw_line"`
-	Discovered time.Time `json:"discovered_at"`
+	Timestamp   time.Time  `json:"timestamp"`
+	Player      string     `json:"player"`
+	X           int        `json:"x"`
+	Y           int        `json:"y"`
+	Z           int        `json:"z"`
+	RawLine     string     `json:"raw_line"`
+	Discovered  time.Time  `json:"discovered_at"`
+	Collected   bool       `json:"collected"`
+	CollectedAt *time.Time `json:"collected_at,omitempty"`
+	CollectedBy string     `json:"collected_by,omitempty"`
+}
+
+type digEvent struct {
+	Timestamp time.Time
+	Player    string
+	X         int
+	Y         int
+	Z         int
+}
+
+type logEvent struct {
+	death *DeathEvent
+	dig   *digEvent
 }
 
 type scannerState struct {
@@ -181,7 +200,7 @@ func loadEvents(path string) ([]DeathEvent, error) {
 	if err := json.Unmarshal(buf, &events); err != nil {
 		return nil, err
 	}
-	sort.Slice(events, func(i, j int) bool {
+	sort.SliceStable(events, func(i, j int) bool {
 		return events[i].Timestamp.Before(events[j].Timestamp)
 	})
 	return events, nil
@@ -263,19 +282,21 @@ func (a *App) refreshFull() (refreshResponse, error) {
 	return refreshResponse{Mode: "full", Added: total, Total: total}, nil
 }
 
-func scanFromOffset(file *os.File, offset int64) ([]DeathEvent, int64, error) {
+func scanFromOffset(file *os.File, offset int64) ([]logEvent, int64, error) {
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		return nil, 0, fmt.Errorf("seek failed: %w", err)
 	}
 
 	reader := bufio.NewReader(file)
-	var found []DeathEvent
+	var found []logEvent
 	for {
 		line, err := reader.ReadString('\n')
 		if len(line) > 0 {
 			line = strings.TrimRight(line, "\r\n")
 			if event, ok := parseDeathEvent(line); ok {
-				found = append(found, event)
+				found = append(found, logEvent{death: &event})
+			} else if event, ok := parseDigEvent(line); ok {
+				found = append(found, logEvent{dig: &event})
 			}
 		}
 		if err != nil {
@@ -293,7 +314,7 @@ func scanFromOffset(file *os.File, offset int64) ([]DeathEvent, int64, error) {
 	return found, newOffset, nil
 }
 
-func (a *App) appendEvents(found []DeathEvent) (total int, added int, err error) {
+func (a *App) appendEvents(found []logEvent) (total int, added int, err error) {
 	if len(found) == 0 {
 		a.eventsMu.RLock()
 		total = len(a.events)
@@ -302,8 +323,8 @@ func (a *App) appendEvents(found []DeathEvent) (total int, added int, err error)
 	}
 
 	a.eventsMu.Lock()
-	a.events = append(a.events, found...)
-	sort.Slice(a.events, func(i, j int) bool {
+	added = applyLogEvents(&a.events, found)
+	sort.SliceStable(a.events, func(i, j int) bool {
 		return a.events[i].Timestamp.Before(a.events[j].Timestamp)
 	})
 	snapshot := append([]DeathEvent(nil), a.events...)
@@ -313,13 +334,12 @@ func (a *App) appendEvents(found []DeathEvent) (total int, added int, err error)
 	if err := persistEvents(a.eventsPath, snapshot); err != nil {
 		return 0, 0, fmt.Errorf("persist events failed: %w", err)
 	}
-	return total, len(found), nil
+	return total, added, nil
 }
 
-func (a *App) replaceEvents(all []DeathEvent) (total int, err error) {
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].Timestamp.Before(all[j].Timestamp)
-	})
+func (a *App) replaceEvents(found []logEvent) (total int, err error) {
+	all := make([]DeathEvent, 0)
+	applyLogEvents(&all, found)
 
 	a.eventsMu.Lock()
 	a.events = append([]DeathEvent(nil), all...)
@@ -331,6 +351,43 @@ func (a *App) replaceEvents(all []DeathEvent) (total int, err error) {
 		return 0, fmt.Errorf("persist events failed: %w", err)
 	}
 	return total, nil
+}
+
+func applyLogEvents(deaths *[]DeathEvent, found []logEvent) int {
+	added := 0
+	for _, event := range found {
+		if event.death != nil {
+			*deaths = append(*deaths, *event.death)
+			added++
+			continue
+		}
+		if event.dig != nil {
+			markCollected(*deaths, *event.dig)
+		}
+	}
+	return added
+}
+
+func markCollected(deaths []DeathEvent, dig digEvent) bool {
+	match := -1
+	for i := range deaths {
+		death := &deaths[i]
+		if death.Collected || death.X != dig.X || death.Y != dig.Y || death.Z != dig.Z || death.Timestamp.After(dig.Timestamp) {
+			continue
+		}
+		// Log timestamps have second precision; the later entry wins a tie.
+		if match == -1 || !death.Timestamp.Before(deaths[match].Timestamp) {
+			match = i
+		}
+	}
+	if match == -1 {
+		return false
+	}
+	deaths[match].Collected = true
+	collectedAt := dig.Timestamp
+	deaths[match].CollectedAt = &collectedAt
+	deaths[match].CollectedBy = dig.Player
+	return true
 }
 
 func persistState(path string, state scannerState) error {
@@ -384,9 +441,35 @@ func parseDeathEvent(line string) (DeathEvent, bool) {
 	}, true
 }
 
+func parseDigEvent(line string) (digEvent, bool) {
+	match := digLinePattern.FindStringSubmatch(line)
+	if len(match) != 6 {
+		return digEvent{}, false
+	}
+
+	timestamp, err := time.ParseInLocation("2006-01-02 15:04:05", match[1], time.Local)
+	if err != nil {
+		return digEvent{}, false
+	}
+	x, err := strconv.Atoi(match[3])
+	if err != nil {
+		return digEvent{}, false
+	}
+	y, err := strconv.Atoi(match[4])
+	if err != nil {
+		return digEvent{}, false
+	}
+	z, err := strconv.Atoi(match[5])
+	if err != nil {
+		return digEvent{}, false
+	}
+
+	return digEvent{Timestamp: timestamp, Player: match[2], X: x, Y: y, Z: z}, true
+}
+
 func (a *App) handleDeaths(w http.ResponseWriter, _ *http.Request) {
 	a.eventsMu.RLock()
-	resp := append([]DeathEvent(nil), a.events...)
+	resp := append([]DeathEvent{}, a.events...)
 	a.eventsMu.RUnlock()
 
 	sort.Slice(resp, func(i, j int) bool {
