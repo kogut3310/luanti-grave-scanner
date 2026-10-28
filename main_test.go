@@ -31,14 +31,80 @@ func TestParseDeathEventInvalid(t *testing.T) {
 	}
 }
 
-func TestParseDigEvent(t *testing.T) {
-	line := "2026-06-04 13:25:50: ACTION[Server]: Alice digs mcl_core:bone_block at (229,-29031,148)"
-	event, ok := parseDigEvent(line)
+func TestParseCollectionEvent(t *testing.T) {
+	line := "2026-06-04 13:25:50: ACTION[Server]: Alice collects bones:bones at (229,-29031,148)"
+	event, ok := parseCollectionEvent(line)
 	if !ok {
-		t.Fatalf("expected dig event to be parsed")
+		t.Fatalf("expected collection event to be parsed")
 	}
 	if event.Player != "Alice" || event.X != 229 || event.Y != -29031 || event.Z != 148 {
-		t.Fatalf("unexpected dig event: %+v", event)
+		t.Fatalf("unexpected collection event: %+v", event)
+	}
+}
+
+func TestBonesCollectionRefresh(t *testing.T) {
+	line := "2026-10-28 11:00:00: ACTION[Server]: Collector collects bones:bones at (-1,-29031,3)"
+	event, ok := parseCollectionEvent(line)
+	if !ok || event.Player != "Collector" || event.X != -1 || event.Y != -29031 || event.Z != 3 {
+		t.Fatalf("unexpected collection: %+v, parsed=%v", event, ok)
+	}
+	for _, mode := range []string{"full", "incremental"} {
+		t.Run(mode, func(t *testing.T) {
+			death := "2026-10-28 10:00:00: ACTION[Server]: Owner dies at (-1,-29031,3). Bones placed\n"
+			app := testAppWithLog(t, death)
+			if mode == "incremental" {
+				if _, err := app.refreshIncremental(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(app.logPath, []byte(death+line+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			refresh := app.refreshFull
+			if mode == "incremental" {
+				refresh = app.refreshIncremental
+			}
+			if _, err := refresh(); err != nil {
+				t.Fatal(err)
+			}
+			restarted, err := newApp(app.logPath, app.statePath, app.eventsPath, app.logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(restarted.events) != 1 {
+				t.Fatalf("unexpected graves: %+v", restarted.events)
+			}
+			grave := restarted.events[0]
+			if !grave.Collected || grave.Player != "Owner" || grave.CollectedBy != "Collector" || grave.CollectedAt == nil || !grave.CollectedAt.Equal(event.Timestamp) {
+				t.Fatalf("collection not persisted: %+v", grave)
+			}
+		})
+	}
+}
+
+func TestRefreshIgnoresDigLogs(t *testing.T) {
+	for _, node := range []string{"mcl_core:bone_block", "bones:bones", "mcl_bones:bones"} {
+		t.Run(node, func(t *testing.T) {
+			line := "2026-10-28 11:00:00: ACTION[Server]: Collector digs " + node + " at (1,2,3)"
+			if _, ok := parseCollectionEvent(line); ok {
+				t.Fatalf("dig log parsed as collection: %s", line)
+			}
+			for _, mode := range []string{"full", "incremental"} {
+				t.Run(mode, func(t *testing.T) {
+					app := testAppWithLog(t, "2026-10-28 10:00:00: ACTION[Server]: Owner dies at (1,2,3). Bones placed\n"+line+"\n")
+					refresh := app.refreshFull
+					if mode == "incremental" {
+						refresh = app.refreshIncremental
+					}
+					if _, err := refresh(); err != nil {
+						t.Fatal(err)
+					}
+					if len(app.events) != 1 || app.events[0].Collected || app.events[0].CollectedBy != "" || app.events[0].CollectedAt != nil {
+						t.Fatalf("dig log changed grave status: %+v", app.events)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -49,7 +115,7 @@ func TestFullRefreshMarksMatchingGraveAsCollected(t *testing.T) {
 	eventsPath := filepath.Join(tmp, "deaths.json")
 	logger := log.New(io.Discard, "", 0)
 	content := "2026-04-24 17:46:02: ACTION[Server]: Mordor dies at (229,-29031,148). Bones placed\n" +
-		"2026-06-04 13:25:50: ACTION[Server]: Alice digs mcl_core:bone_block at (229,-29031,148)\n"
+		"2026-06-04 13:25:50: ACTION[Server]: Alice collects bones:bones at (229,-29031,148)\n"
 	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
@@ -71,14 +137,14 @@ func TestFullRefreshMarksMatchingGraveAsCollected(t *testing.T) {
 	}
 }
 
-func TestDigMarksLatestActiveGraveAtCoordinates(t *testing.T) {
+func TestCollectionMarksLatestActiveGraveAtCoordinates(t *testing.T) {
 	first, _ := parseDeathEvent("2026-01-01 10:00:00: ACTION[Server]: First dies at (1,2,3). Bones placed")
 	first.Collected = true
 	second, _ := parseDeathEvent("2026-02-01 10:00:00: ACTION[Server]: Second dies at (1,2,3). Bones placed")
-	dig, _ := parseDigEvent("2026-02-02 10:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)")
+	collection, _ := parseCollectionEvent("2026-02-02 10:00:00: ACTION[Server]: Collector collects bones:bones at (1,2,3)")
 	deaths := []DeathEvent{first, second}
 
-	if !markCollected(deaths, dig) {
+	if !markCollected(deaths, collection) {
 		t.Fatal("expected a matching grave")
 	}
 	if deaths[0].CollectedBy != "" || !deaths[1].Collected || deaths[1].CollectedBy != "Collector" {
@@ -194,17 +260,17 @@ func testAppWithLog(t *testing.T, content string) *App {
 
 func TestIncrementalCollectionSurvivesRestart(t *testing.T) {
 	death := "2026-10-28 10:00:00: ACTION[Server]: Owner dies at (1,2,3). Bones placed\n"
-	dig := "2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)\n"
+	collection := "2026-10-28 11:00:00: ACTION[Server]: Collector collects bones:bones at (1,2,3)\n"
 	app := testAppWithLog(t, death)
 	if _, err := app.refreshIncremental(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(app.logPath, []byte(death+dig), 0o644); err != nil {
+	if err := os.WriteFile(app.logPath, []byte(death+collection), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	res, err := app.refreshIncremental()
 	if err != nil || res.Added != 0 || res.Total != 1 {
-		t.Fatalf("dig-only refresh: %+v, %v", res, err)
+		t.Fatalf("collection-only refresh: %+v, %v", res, err)
 	}
 	restarted, err := newApp(app.logPath, app.statePath, app.eventsPath, app.logger)
 	if err != nil {
@@ -223,7 +289,7 @@ func TestIncrementalCollectionSurvivesRestart(t *testing.T) {
 	if len(deaths) != 1 || deaths[0].Player != "Owner" || !deaths[0].Collected || deaths[0].CollectedBy != "Collector" || deaths[0].CollectedAt == nil {
 		t.Fatalf("collection missing from persisted API data: %+v", deaths)
 	}
-	parsed, _ := parseDigEvent(dig[:len(dig)-1])
+	parsed, _ := parseCollectionEvent(collection[:len(collection)-1])
 	if !deaths[0].CollectedAt.Equal(parsed.Timestamp) {
 		t.Fatalf("unexpected collection timestamp: %v", deaths[0].CollectedAt)
 	}
@@ -242,7 +308,7 @@ func TestCollectionAfterLogRotationPreservesHistory(t *testing.T) {
 	if _, err := app.refreshIncremental(); err != nil {
 		t.Fatal(err)
 	}
-	rotated := "2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)\n"
+	rotated := "2026-10-28 11:00:00: ACTION[Server]: Collector collects bones:bones at (1,2,3)\n"
 	if err := os.WriteFile(app.logPath, []byte(rotated), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -255,20 +321,20 @@ func TestCollectionAfterLogRotationPreservesHistory(t *testing.T) {
 	}
 }
 
-func TestDigMatchesLatestGraveWithinSameSecond(t *testing.T) {
+func TestCollectionMatchesLatestGraveWithinSameSecond(t *testing.T) {
 	app := testAppWithLog(t,
 		"2026-10-28 10:00:00: ACTION[Server]: First dies at (1,2,3). Bones placed\n"+
 			"2026-10-28 10:00:00: ACTION[Server]: Second dies at (1,2,3). Bones placed\n"+
-			"2026-10-28 10:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)\n")
+			"2026-10-28 10:00:00: ACTION[Server]: Collector collects bones:bones at (1,2,3)\n")
 	if _, err := app.refreshFull(); err != nil {
 		t.Fatal(err)
 	}
 	if len(app.events) != 2 || app.events[0].Collected || !app.events[1].Collected {
-		t.Fatalf("dig did not match latest grave in log order: %+v", app.events)
+		t.Fatalf("collection did not match latest grave in log order: %+v", app.events)
 	}
 }
 
-func TestDigDoesNotMatchUnrelatedGraves(t *testing.T) {
+func TestCollectionDoesNotMatchUnrelatedGraves(t *testing.T) {
 	for _, tc := range []struct {
 		name, death string
 		collected   bool
@@ -283,23 +349,27 @@ func TestDigDoesNotMatchUnrelatedGraves(t *testing.T) {
 				t.Fatal("invalid death fixture")
 			}
 			death.Collected = tc.collected
-			dig, _ := parseDigEvent("2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)")
+			collection, _ := parseCollectionEvent("2026-10-28 11:00:00: ACTION[Server]: Collector collects bones:bones at (1,2,3)")
 			deaths := []DeathEvent{death}
-			if markCollected(deaths, dig) || deaths[0].CollectedBy != "" || deaths[0].Collected != tc.collected {
+			if markCollected(deaths, collection) || deaths[0].CollectedBy != "" || deaths[0].Collected != tc.collected {
 				t.Fatalf("unrelated grave modified: %+v", deaths)
 			}
 		})
 	}
 }
 
-func TestParseDigEventInvalid(t *testing.T) {
+func TestParseCollectionEventInvalid(t *testing.T) {
 	for _, line := range []string{
+		"2026-10-28 11:00:00: ACTION[Server]: Collector punches bones:bones at (1,2,3)",
+		"2026-10-28 11:00:00: ACTION[Server]: Collector takes items from bones:bones at (1,2,3)",
+		"2026-10-28 11:00:00: ACTION[Server]: Collector collects mcl_core:stone at (1,2,3)",
+		"2026-99-28 11:00:00: ACTION[Server]: Collector collects bones:bones at (1,2,3)",
+		"2026-10-28 11:00:00: ACTION[Server]: Collector collects bones:bones at (1,2,3) extra",
 		"2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:stone at (1,2,3)",
-		"2026-99-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)",
-		"2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (99999999999999999999999,2,3)",
+		"2026-10-28 11:00:00: ACTION[Server]: Collector collects bones:bones at (99999999999999999999999,2,3)",
 	} {
-		if _, ok := parseDigEvent(line); ok {
-			t.Errorf("unexpected dig parsed: %s", line)
+		if _, ok := parseCollectionEvent(line); ok {
+			t.Errorf("unexpected collection parsed: %s", line)
 		}
 	}
 }

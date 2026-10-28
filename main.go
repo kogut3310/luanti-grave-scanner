@@ -26,7 +26,9 @@ const (
 
 var (
 	deathLinePattern = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}): ACTION\[Server\]: ([^ ]+) dies at \((-?[0-9]+),(-?[0-9]+),(-?[0-9]+)\)\. Bones placed$`)
-	digLinePattern   = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}): ACTION\[Server\]: ([^ ]+) digs mcl_core:bone_block at \((-?[0-9]+),(-?[0-9]+),(-?[0-9]+)\)$`)
+	// The bones mod removes emptied graves directly, so it needs an explicit
+	// collection log; engine dig logs do not confirm collection.
+	collectionLinePattern = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}): ACTION\[Server\]: ([^ ]+) collects bones:bones at \((-?[0-9]+),(-?[0-9]+),(-?[0-9]+)\)$`)
 )
 
 //go:embed web/index.html
@@ -45,7 +47,7 @@ type DeathEvent struct {
 	CollectedBy string     `json:"collected_by,omitempty"`
 }
 
-type digEvent struct {
+type collectionEvent struct {
 	Timestamp time.Time
 	Player    string
 	X         int
@@ -54,8 +56,8 @@ type digEvent struct {
 }
 
 type logEvent struct {
-	death *DeathEvent
-	dig   *digEvent
+	death      *DeathEvent
+	collection *collectionEvent
 }
 
 type scannerState struct {
@@ -295,8 +297,8 @@ func scanFromOffset(file *os.File, offset int64) ([]logEvent, int64, error) {
 			line = strings.TrimRight(line, "\r\n")
 			if event, ok := parseDeathEvent(line); ok {
 				found = append(found, logEvent{death: &event})
-			} else if event, ok := parseDigEvent(line); ok {
-				found = append(found, logEvent{dig: &event})
+			} else if event, ok := parseCollectionEvent(line); ok {
+				found = append(found, logEvent{collection: &event})
 			}
 		}
 		if err != nil {
@@ -361,18 +363,18 @@ func applyLogEvents(deaths *[]DeathEvent, found []logEvent) int {
 			added++
 			continue
 		}
-		if event.dig != nil {
-			markCollected(*deaths, *event.dig)
+		if event.collection != nil {
+			markCollected(*deaths, *event.collection)
 		}
 	}
 	return added
 }
 
-func markCollected(deaths []DeathEvent, dig digEvent) bool {
+func markCollected(deaths []DeathEvent, collection collectionEvent) bool {
 	match := -1
 	for i := range deaths {
 		death := &deaths[i]
-		if death.Collected || death.X != dig.X || death.Y != dig.Y || death.Z != dig.Z || death.Timestamp.After(dig.Timestamp) {
+		if death.Collected || death.X != collection.X || death.Y != collection.Y || death.Z != collection.Z || death.Timestamp.After(collection.Timestamp) {
 			continue
 		}
 		// Log timestamps have second precision; the later entry wins a tie.
@@ -384,9 +386,9 @@ func markCollected(deaths []DeathEvent, dig digEvent) bool {
 		return false
 	}
 	deaths[match].Collected = true
-	collectedAt := dig.Timestamp
+	collectedAt := collection.Timestamp
 	deaths[match].CollectedAt = &collectedAt
-	deaths[match].CollectedBy = dig.Player
+	deaths[match].CollectedBy = collection.Player
 	return true
 }
 
@@ -441,30 +443,30 @@ func parseDeathEvent(line string) (DeathEvent, bool) {
 	}, true
 }
 
-func parseDigEvent(line string) (digEvent, bool) {
-	match := digLinePattern.FindStringSubmatch(line)
+func parseCollectionEvent(line string) (collectionEvent, bool) {
+	match := collectionLinePattern.FindStringSubmatch(line)
 	if len(match) != 6 {
-		return digEvent{}, false
+		return collectionEvent{}, false
 	}
 
 	timestamp, err := time.ParseInLocation("2006-01-02 15:04:05", match[1], time.Local)
 	if err != nil {
-		return digEvent{}, false
+		return collectionEvent{}, false
 	}
 	x, err := strconv.Atoi(match[3])
 	if err != nil {
-		return digEvent{}, false
+		return collectionEvent{}, false
 	}
 	y, err := strconv.Atoi(match[4])
 	if err != nil {
-		return digEvent{}, false
+		return collectionEvent{}, false
 	}
 	z, err := strconv.Atoi(match[5])
 	if err != nil {
-		return digEvent{}, false
+		return collectionEvent{}, false
 	}
 
-	return digEvent{Timestamp: timestamp, Player: match[2], X: x, Y: y, Z: z}, true
+	return collectionEvent{Timestamp: timestamp, Player: match[2], X: x, Y: y, Z: z}, true
 }
 
 func (a *App) handleDeaths(w http.ResponseWriter, _ *http.Request) {

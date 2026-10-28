@@ -1,0 +1,43 @@
+--- a/functions.lua
++++ b/functions.lua
+@@ -48,8 +48,12 @@
+ 	return fs
+ end
+ 
+-local function remove_bones(pos)
++local function remove_bones(pos, player)
+ 	core.remove_node(pos)
++	if player then
++		core.log("action", player:get_player_name() ..
++			" collects bones:bones at " .. core.pos_to_string(pos))
++	end
+ 	if core.get_modpath("named_waypoints") then
+ 		named_waypoints.remove_waypoint("bones", pos)
+ 	end
+@@ -96,7 +100,7 @@
+ 		-- else
+ 		--    core.add_item(pos, "bones:bones")
+ 		-- end
+-		remove_bones(pos)
++		remove_bones(pos, player)
+ 	end
+ end
+ 
+@@ -127,7 +131,7 @@
+ 		-- else
+ 		--    core.add_item(pos,"bones:bones")
+ 		-- end
+-		remove_bones(pos)
++		remove_bones(pos, player)
+ 	end
+ end
+ 
+@@ -269,6 +273,8 @@
+ 	end
+ 	local param2 = core.dir_to_facedir(player:get_look_dir())
+ 	core.set_node(pos, {name = "bones:bones", param2 = param2})
++	-- The grave may have been moved to nearby air; log its actual position.
++	pos_string = core.pos_to_string(pos)
+ 	core.log("action", player_name .. " dies at " .. pos_string ..
+ 		". Bones placed")
+ 	if bones_position_message then

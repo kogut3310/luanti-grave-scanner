@@ -9,7 +9,7 @@ Prosta aplikacja w **Go** do monitorowania logu serwera Luanti i wyłapywania wp
 ## Co robi aplikacja
 
 - parsuje wpisy śmierci (`dies at ... Bones placed`),
-- rozpoznaje wykopanie grobu (`digs mcl_core:bone_block`) i łączy je z najnowszym aktywnym grobem o tych samych współrzędnych,
+- rozpoznaje odbiór grobu wyłącznie na podstawie `collects bones:bones` i łączy je z najnowszym aktywnym grobem o tych samych współrzędnych,
 - trzyma listę znalezionych zgonów w osobnym pliku `deaths.json`,
 - zapamiętuje offset odczytu (`scanner-state.json`) i odświeża przyrostowo,
 - wykrywa przycięcie/rotację logu (gdy rozmiar pliku jest mniejszy niż zapisany offset) i resetuje offset,
@@ -41,7 +41,7 @@ W wersji v0.2 użyte zostały nazwy:
 UI oferuje:
 - filtr po nicku (dropdown),
 - domyślnie pokazuje tylko aktywne groby; opcja `Pokaż także podniesione groby` włącza również historię,
-- w widoku wszystkich grobów aktywne wiersze są czerwonawe, a podniesione zielonkawe i zawierają nick gracza, który wykopał grób,
+- w widoku wszystkich grobów aktywne wiersze są czerwonawe, a podniesione zielonkawe i zawierają nick gracza, który odebrał grób,
 - zakres czasu (radio): `dziś` (domyślnie), `tydzień`, `miesiąc`, `wszystko`,
 - przełącznik motywu: `white` / `black` (light/dark).
 
@@ -51,12 +51,24 @@ Przykładowa para skorelowanych wpisów:
 
 ```txt
 2026-04-24 17:46:02: ACTION[Server]: Mordor dies at (229,-29031,148). Bones placed
-2026-06-04 13:25:50: ACTION[Server]: Alice digs mcl_core:bone_block at (229,-29031,148)
+2026-06-04 13:25:50: ACTION[Server]: Alice collects bones:bones at (229,-29031,148)
 ```
 
 W tym przykładzie właścicielem grobu jest `Mordor`, a grób został podniesiony przez `Alice`. Oryginalny plik logu pozostaje otwierany wyłącznie do odczytu.
 
-Po aktualizacji istniejące wpisy z `deaths.json` pozostają zgodne i bez informacji o podniesieniu są traktowane jako aktywne. Aby uwzględnić wykopania zapisane wcześniej w już przeskanowanej części logu, wykonaj jednorazowo **Pełny reskan logu**. Odbuduje on listę wyłącznie z aktualnego pliku logu, więc nie zachowa wpisów dostępnych już tylko w archiwalnych logach. Zwykłe odświeżanie przyrostowe zachowuje dotychczasową historię również po wykryciu skrócenia logu i może oznaczyć wcześniejszy grób jako podniesiony na podstawie nowego wpisu.
+Po aktualizacji istniejące wpisy z `deaths.json` pozostają zgodne i bez informacji o podniesieniu są traktowane jako aktywne. Aby uwzględnić wpisy `collects bones:bones` zapisane wcześniej w już przeskanowanej części logu, wykonaj jednorazowo **Pełny reskan logu**. Odbuduje on listę wyłącznie z aktualnego pliku logu, więc nie zachowa wpisów dostępnych już tylko w archiwalnych logach. Zwykłe odświeżanie przyrostowe zachowuje dotychczasową historię również po wykryciu skrócenia logu i może oznaczyć wcześniejszy grób jako podniesiony na podstawie nowego wpisu.
+
+Wpisy `digs ...` są ignorowane. Statusy podniesienia zapisane wcześniej w `deaths.json` pozostają zachowane; pełny reskan odbudowuje je wyłącznie z wpisów `collects bones:bones` w aktualnym logu.
+
+## Mod bones w Mineclonii: brak logu po odbiorze
+
+Mod Gravestone (`bones:bones`) w przesłanej wersji usuwa opróżniony grób przez
+`core.remove_node`, bez zapisu odbioru w logu. Samo rozszerzenie parsera nie wystarczy.
+W repozytorium jest [poprawka modu i instrukcja instalacji](integrations/bones/README.md),
+która dodaje wpis `Collector collects bones:bones at (x,y,z)` po zabraniu całej
+zawartości przez uderzenie lub okno ekwipunku. Wymaga zastosowania poprawki
+na serwerze i restartu Luanti. Działa także dla publicznych grobów odbieranych
+przez innego gracza. Nie da się odtworzyć wcześniejszych odbiorów bez logów.
 
 ## Wymagania
 
