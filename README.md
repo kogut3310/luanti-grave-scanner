@@ -56,6 +56,8 @@ Przykładowa para skorelowanych wpisów:
 
 W tym przykładzie właścicielem grobu jest `Mordor`, a grób został podniesiony przez `Alice`. Oryginalny plik logu pozostaje otwierany wyłącznie do odczytu.
 
+Po aktualizacji istniejące wpisy z `deaths.json` pozostają zgodne i bez informacji o podniesieniu są traktowane jako aktywne. Aby uwzględnić wykopania zapisane wcześniej w już przeskanowanej części logu, wykonaj jednorazowo **Pełny reskan logu**. Odbuduje on listę wyłącznie z aktualnego pliku logu, więc nie zachowa wpisów dostępnych już tylko w archiwalnych logach. Zwykłe odświeżanie przyrostowe zachowuje dotychczasową historię również po wykryciu skrócenia logu i może oznaczyć wcześniejszy grób jako podniesiony na podstawie nowego wpisu.
+
 ## Wymagania
 
 - Go 1.22+

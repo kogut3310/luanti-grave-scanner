@@ -200,7 +200,7 @@ func loadEvents(path string) ([]DeathEvent, error) {
 	if err := json.Unmarshal(buf, &events); err != nil {
 		return nil, err
 	}
-	sort.Slice(events, func(i, j int) bool {
+	sort.SliceStable(events, func(i, j int) bool {
 		return events[i].Timestamp.Before(events[j].Timestamp)
 	})
 	return events, nil
@@ -223,8 +223,7 @@ func (a *App) refreshIncremental() (refreshResponse, error) {
 
 	a.stateMu.Lock()
 	offset := a.state.Offset
-	rebuild := stat.Size() < offset
-	if rebuild {
+	if stat.Size() < offset {
 		a.logger.Printf("log truncation detected (size=%d < offset=%d), resetting offset to 0", stat.Size(), offset)
 		offset = 0
 	}
@@ -244,13 +243,7 @@ func (a *App) refreshIncremental() (refreshResponse, error) {
 		return refreshResponse{}, fmt.Errorf("persist state failed: %w", err)
 	}
 
-	var total, added int
-	if rebuild {
-		total, err = a.replaceEvents(found)
-		added = total
-	} else {
-		total, added, err = a.appendEvents(found)
-	}
+	total, added, err := a.appendEvents(found)
 	if err != nil {
 		return refreshResponse{}, err
 	}
@@ -331,7 +324,7 @@ func (a *App) appendEvents(found []logEvent) (total int, added int, err error) {
 
 	a.eventsMu.Lock()
 	added = applyLogEvents(&a.events, found)
-	sort.Slice(a.events, func(i, j int) bool {
+	sort.SliceStable(a.events, func(i, j int) bool {
 		return a.events[i].Timestamp.Before(a.events[j].Timestamp)
 	})
 	snapshot := append([]DeathEvent(nil), a.events...)
@@ -382,7 +375,8 @@ func markCollected(deaths []DeathEvent, dig digEvent) bool {
 		if death.Collected || death.X != dig.X || death.Y != dig.Y || death.Z != dig.Z || death.Timestamp.After(dig.Timestamp) {
 			continue
 		}
-		if match == -1 || deaths[match].Timestamp.Before(death.Timestamp) {
+		// Log timestamps have second precision; the later entry wins a tie.
+		if match == -1 || !death.Timestamp.Before(deaths[match].Timestamp) {
 			match = i
 		}
 	}
@@ -475,7 +469,7 @@ func parseDigEvent(line string) (digEvent, bool) {
 
 func (a *App) handleDeaths(w http.ResponseWriter, _ *http.Request) {
 	a.eventsMu.RLock()
-	resp := append([]DeathEvent(nil), a.events...)
+	resp := append([]DeathEvent{}, a.events...)
 	a.eventsMu.RUnlock()
 
 	sort.Slice(resp, func(i, j int) bool {

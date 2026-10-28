@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"log"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -171,8 +173,146 @@ func TestRefreshIncrementalHandlesTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refresh after truncation: %v", err)
 	}
-	if res.Added != 1 || res.Total != 1 {
+	if res.Added != 1 || res.Total != 2 {
 		t.Fatalf("unexpected response after truncation: %+v", res)
+	}
+}
+
+func testAppWithLog(t *testing.T, content string) *App {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "debug.txt")
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := newApp(logPath, filepath.Join(dir, "scanner-state.json"), filepath.Join(dir, "deaths.json"), log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+func TestIncrementalCollectionSurvivesRestart(t *testing.T) {
+	death := "2026-10-28 10:00:00: ACTION[Server]: Owner dies at (1,2,3). Bones placed\n"
+	dig := "2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)\n"
+	app := testAppWithLog(t, death)
+	if _, err := app.refreshIncremental(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(app.logPath, []byte(death+dig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := app.refreshIncremental()
+	if err != nil || res.Added != 0 || res.Total != 1 {
+		t.Fatalf("dig-only refresh: %+v, %v", res, err)
+	}
+	restarted, err := newApp(app.logPath, app.statePath, app.eventsPath, app.logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = restarted.refreshIncremental()
+	if err != nil || res.Added != 0 || res.Total != 1 {
+		t.Fatalf("refresh after restart: %+v, %v", res, err)
+	}
+	recorder := httptest.NewRecorder()
+	restarted.handleDeaths(recorder, httptest.NewRequest("GET", "/api/deaths", nil))
+	var deaths []DeathEvent
+	if err := json.Unmarshal(recorder.Body.Bytes(), &deaths); err != nil {
+		t.Fatal(err)
+	}
+	if len(deaths) != 1 || deaths[0].Player != "Owner" || !deaths[0].Collected || deaths[0].CollectedBy != "Collector" || deaths[0].CollectedAt == nil {
+		t.Fatalf("collection missing from persisted API data: %+v", deaths)
+	}
+	parsed, _ := parseDigEvent(dig[:len(dig)-1])
+	if !deaths[0].CollectedAt.Equal(parsed.Timestamp) {
+		t.Fatalf("unexpected collection timestamp: %v", deaths[0].CollectedAt)
+	}
+	if _, err := restarted.refreshFull(); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.events) != 1 || !restarted.events[0].Collected {
+		t.Fatalf("full refresh disagrees with incremental refresh: %+v", restarted.events)
+	}
+}
+
+func TestCollectionAfterLogRotationPreservesHistory(t *testing.T) {
+	app := testAppWithLog(t,
+		"2026-10-28 10:00:00: ACTION[Server]: Owner dies at (1,2,3). Bones placed\n"+
+			"2026-10-28 10:01:00: ACTION[Server]: Other dies at (4,5,6). Bones placed\n")
+	if _, err := app.refreshIncremental(); err != nil {
+		t.Fatal(err)
+	}
+	rotated := "2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)\n"
+	if err := os.WriteFile(app.logPath, []byte(rotated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := app.refreshIncremental()
+	if err != nil || res.Added != 0 || res.Total != 2 {
+		t.Fatalf("history lost on rotation: %+v, %v", res, err)
+	}
+	if !app.events[0].Collected || app.events[1].Collected {
+		t.Fatalf("wrong collection after rotation: %+v", app.events)
+	}
+}
+
+func TestDigMatchesLatestGraveWithinSameSecond(t *testing.T) {
+	app := testAppWithLog(t,
+		"2026-10-28 10:00:00: ACTION[Server]: First dies at (1,2,3). Bones placed\n"+
+			"2026-10-28 10:00:00: ACTION[Server]: Second dies at (1,2,3). Bones placed\n"+
+			"2026-10-28 10:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)\n")
+	if _, err := app.refreshFull(); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.events) != 2 || app.events[0].Collected || !app.events[1].Collected {
+		t.Fatalf("dig did not match latest grave in log order: %+v", app.events)
+	}
+}
+
+func TestDigDoesNotMatchUnrelatedGraves(t *testing.T) {
+	for _, tc := range []struct {
+		name, death string
+		collected   bool
+	}{
+		{"different coordinates", "2026-10-28 10:00:00: ACTION[Server]: Owner dies at (4,5,6). Bones placed", false},
+		{"future death", "2026-10-28 12:00:00: ACTION[Server]: Owner dies at (1,2,3). Bones placed", false},
+		{"already collected", "2026-10-28 10:00:00: ACTION[Server]: Owner dies at (1,2,3). Bones placed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			death, ok := parseDeathEvent(tc.death)
+			if !ok {
+				t.Fatal("invalid death fixture")
+			}
+			death.Collected = tc.collected
+			dig, _ := parseDigEvent("2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)")
+			deaths := []DeathEvent{death}
+			if markCollected(deaths, dig) || deaths[0].CollectedBy != "" || deaths[0].Collected != tc.collected {
+				t.Fatalf("unrelated grave modified: %+v", deaths)
+			}
+		})
+	}
+}
+
+func TestParseDigEventInvalid(t *testing.T) {
+	for _, line := range []string{
+		"2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:stone at (1,2,3)",
+		"2026-99-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (1,2,3)",
+		"2026-10-28 11:00:00: ACTION[Server]: Collector digs mcl_core:bone_block at (99999999999999999999999,2,3)",
+	} {
+		if _, ok := parseDigEvent(line); ok {
+			t.Errorf("unexpected dig parsed: %s", line)
+		}
+	}
+}
+
+func TestEmptyDeathsAPIIsArray(t *testing.T) {
+	app := testAppWithLog(t, "")
+	if _, err := app.refreshFull(); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	app.handleDeaths(recorder, httptest.NewRequest("GET", "/api/deaths", nil))
+	if recorder.Body.String() != "[]\n" {
+		t.Fatalf("empty UI requires an array, got %s", recorder.Body.String())
 	}
 }
 
