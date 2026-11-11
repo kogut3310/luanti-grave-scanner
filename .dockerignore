@@ -1,0 +1,11 @@
+.git
+work
+data
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+debug.txt*
+node_modules
+luanti-grave-scanner
