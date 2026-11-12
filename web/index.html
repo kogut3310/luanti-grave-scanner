@@ -1,299 +1,773 @@
 <!doctype html>
 <html lang="pl">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Luanti Grave Scanner</title>
-  <style>
-    :root {
-      --bg: #f5f5f5;
-      --panel: #ffffff;
-      --text: #111;
-      --muted: #666;
-      --border: #ddd;
-      --th-bg: #222;
-      --th-text: #fff;
-      --btn-bg: #1f6feb;
-      --btn-text: #fff;
-      --input-bg: #fff;
-      --active-row: #ffe1e1;
-      --collected-row: #dcf7df;
-    }
-
-    body.theme-dark {
-      --bg: #0f1115;
-      --panel: #1a1f29;
-      --text: #e6edf3;
-      --muted: #9aa4b2;
-      --border: #313946;
-      --th-bg: #2b3240;
-      --th-text: #f1f5f9;
-      --btn-bg: #2f81f7;
-      --btn-text: #fff;
-      --input-bg: #252c38;
-      --active-row: #4a2529;
-      --collected-row: #203f2b;
-    }
-
-    body {
-      font-family: Arial, sans-serif;
-      margin: 2rem;
-      background: var(--bg);
-      color: var(--text);
-    }
-
-    .toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.8rem;
-      margin-bottom: 1rem;
-      align-items: center;
-    }
-
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 0.9rem;
-    }
-
-    button {
-      padding: 0.5rem 0.8rem;
-      border: none;
-      border-radius: 6px;
-      background: var(--btn-bg);
-      color: var(--btn-text);
-      cursor: pointer;
-    }
-
-    select {
-      color: var(--text);
-      background: var(--input-bg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 0.35rem;
-    }
-
-    select option { color: var(--text); background: var(--input-bg); }
-    label { color: var(--text); }
-    .muted { color: var(--muted); }
-    .show-all .grave-active { background: var(--active-row); }
-    .show-all .grave-collected { background: var(--collected-row); }
-
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      background: var(--panel);
-    }
-
-    th, td {
-      border: 1px solid var(--border);
-      padding: 0.6rem;
-      text-align: left;
-    }
-
-    th {
-      background: var(--th-bg);
-      color: var(--th-text);
-    }
-
-    footer { margin-top: 1.5rem; color: var(--muted); }
-  </style>
-</head>
-<body>
-  <h1>Luanti Grave Scanner</h1>
-
-  <div class="toolbar panel">
-    <button id="refreshIncBtn">Odśwież nowe wpisy</button>
-    <button id="refreshFullBtn">Pełny reskan logu</button>
-
-    <label for="playerFilter">Nick:</label>
-    <select id="playerFilter"></select>
-
-    <label><input id="showCollected" type="checkbox"> Pokaż także podniesione groby</label>
-
-    <span>
-      Zakres czasu:
-      <label><input type="radio" name="timeRange" value="today"> dziś</label>
-      <label><input type="radio" name="timeRange" value="week"> tydzień</label>
-      <label><input type="radio" name="timeRange" value="month"> miesiąc</label>
-      <label><input type="radio" name="timeRange" value="all"> wszystko</label>
-    </span>
-
-    <label><input id="themeToggle" type="checkbox"> Tryb dark</label>
-  </div>
-
-  <p id="status" class="muted">Gotowe.</p>
-
-  <table>
-    <thead>
-      <tr>
-        <th>Kiedy</th>
-        <th>Gracz</th>
-        <th>Współrzędne (x,y,z)</th>
-        <th>Podniesiony przez</th>
-      </tr>
-    </thead>
-    <tbody id="rows">
-      <tr><td colspan="4" class="muted">Ładowanie...</td></tr>
-    </tbody>
-  </table>
-
-  <footer>Wersja aplikacji: <strong>v0.2</strong></footer>
-
-  <script>
-    const STORAGE_KEYS = {
-      player: 'graveScanner.player',
-      range: 'graveScanner.range',
-      theme: 'graveScanner.theme',
-      showCollected: 'graveScanner.showCollected'
-    };
-
-    const rows = document.getElementById('rows');
-    const statusEl = document.getElementById('status');
-    const playerFilter = document.getElementById('playerFilter');
-    const themeToggle = document.getElementById('themeToggle');
-    const showCollected = document.getElementById('showCollected');
-    let allEvents = [];
-
-    function setStatus(msg) { statusEl.textContent = msg; }
-    function fmtTs(ts) {
-      const d = new Date(ts);
-      return Number.isNaN(d.getTime()) ? ts : d.toLocaleString('pl-PL');
-    }
-
-    function loadPreferences() {
-      const savedRange = localStorage.getItem(STORAGE_KEYS.range) || 'today';
-      const target = document.querySelector(`input[name="timeRange"][value="${savedRange}"]`) ||
-                     document.querySelector('input[name="timeRange"][value="today"]');
-      target.checked = true;
-
-      const savedTheme = localStorage.getItem(STORAGE_KEYS.theme) || 'light';
-      document.body.classList.toggle('theme-dark', savedTheme === 'dark');
-      themeToggle.checked = savedTheme === 'dark';
-
-      showCollected.checked = localStorage.getItem(STORAGE_KEYS.showCollected) === 'true';
-    }
-
-    function saveRange(value) { localStorage.setItem(STORAGE_KEYS.range, value); }
-    function saveTheme(value) { localStorage.setItem(STORAGE_KEYS.theme, value); }
-
-    function getTimeRange() {
-      return document.querySelector('input[name="timeRange"]:checked')?.value || 'today';
-    }
-
-    function escapeHtml(value) {
-      const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-      return String(value ?? '').replace(/[&<>"']/g, ch => entities[ch]);
-    }
-
-    function withinRange(ts, range) {
-      if (range === 'all') return true;
-      const d = new Date(ts);
-      const now = new Date();
-      if (range === 'today') {
-        return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Luanti Grave Scanner</title>
+    <style>
+      :root {
+        --bg: #f3f5f8;
+        --panel: #fff;
+        --text: #17202e;
+        --muted: #586578;
+        --border: #d7dee8;
+        --accent: #245bd7;
+        --tint: #edf3ff;
+        --green: #146b49;
+        --amber: #8c5a00;
+        --red: #a33232;
       }
-      const diffMs = now - d;
-      if (range === 'week') return diffMs <= 7 * 24 * 60 * 60 * 1000;
-      if (range === 'month') return diffMs <= 30 * 24 * 60 * 60 * 1000;
-      return true;
-    }
-
-    function rebuildPlayerOptions() {
-      const selected = localStorage.getItem(STORAGE_KEYS.player) || 'all';
-      const players = Array.from(new Set(allEvents.map(e => e.player))).sort((a, b) => a.localeCompare(b, 'pl'));
-      const options = ['<option value="all">wszyscy</option>', ...players.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`)];
-      playerFilter.innerHTML = options.join('');
-      if (players.includes(selected) || selected === 'all') {
-        playerFilter.value = selected;
-      } else {
-        playerFilter.value = 'all';
+      body.theme-dark {
+        --bg: #10151d;
+        --panel: #19222f;
+        --text: #e6edf6;
+        --muted: #a6b4c7;
+        --border: #344258;
+        --accent: #87adff;
+        --tint: #263952;
+        --green: #8ad6b1;
+        --amber: #f3cc80;
+        --red: #f6aaaa;
       }
-    }
-
-    function renderTable() {
-      const selectedPlayer = playerFilter.value || 'all';
-      const range = getTimeRange();
-      const includeCollected = showCollected.checked;
-      document.querySelector('table').classList.toggle('show-all', includeCollected);
-      const filtered = allEvents.filter(ev =>
-        (includeCollected || !ev.collected) &&
-        (selectedPlayer === 'all' || ev.player === selectedPlayer) &&
-        withinRange(ev.timestamp, range)
-      );
-      if (filtered.length === 0) {
-        rows.innerHTML = '<tr><td colspan="4" class="muted">Brak danych dla aktualnych filtrów.</td></tr>';
-        return;
+      * {
+        box-sizing: border-box;
       }
-      rows.innerHTML = filtered.map(item => `
-        <tr class="${item.collected ? 'grave-collected' : 'grave-active'}">
-          <td>${fmtTs(item.timestamp)}</td>
-          <td>${escapeHtml(item.player)}</td>
-          <td>(${item.x}, ${item.y}, ${item.z})</td>
-          <td>${item.collected ? escapeHtml(item.collected_by) : '—'}</td>
-        </tr>
-      `).join('');
-    }
-
-    async function loadDeaths() {
-      const res = await fetch('/api/deaths', { cache: 'no-store' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      allEvents = await res.json();
-      rebuildPlayerOptions();
-      renderTable();
-    }
-
-    async function triggerRefresh(url, label) {
-      setStatus(label + '...');
-      try {
-        const res = await fetch(url, { method: 'POST' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const info = await res.json();
-        await loadDeaths();
-        setStatus(`Zakończono (${info.mode}): dodano ${info.added}, łącznie ${info.total}.`);
-      } catch (err) {
-        setStatus('Błąd odświeżania: ' + err.message);
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.45;
       }
-    }
-
-    document.getElementById('refreshIncBtn').addEventListener('click', () =>
-      triggerRefresh('/api/refresh/incremental', 'Trwa odświeżanie nowych wpisów')
-    );
-
-    document.getElementById('refreshFullBtn').addEventListener('click', () => {
-      if (!confirm('To wykona pełny skan od początku i nadpisze listę. Kontynuować?')) return;
-      triggerRefresh('/api/refresh/full', 'Trwa pełny reskan logu');
-    });
-
-    playerFilter.addEventListener('change', () => {
-      localStorage.setItem(STORAGE_KEYS.player, playerFilter.value);
-      renderTable();
-    });
-
-    showCollected.addEventListener('change', () => {
-      localStorage.setItem(STORAGE_KEYS.showCollected, String(showCollected.checked));
-      renderTable();
-    });
-
-    document.querySelectorAll('input[name="timeRange"]').forEach(r => {
-      r.addEventListener('change', () => {
-        saveRange(r.value);
+      main {
+        max-width: 1500px;
+        margin: auto;
+        padding: 30px 24px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        align-items: center;
+        margin-bottom: 24px;
+      }
+      h1 {
+        font-size: 1.7rem;
+        margin: 0;
+      }
+      p {
+        margin: 6px 0;
+      }
+      .muted,
+      small {
+        color: var(--muted);
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px;
+        margin-bottom: 18px;
+      }
+      .actions,
+      .filters,
+      .tabs {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .actions {
+        align-items: stretch;
+      }
+      button,
+      select {
+        font: inherit;
+        border-radius: 7px;
+        border: 1px solid var(--border);
+        padding: 9px 13px;
+        background: var(--panel);
+        color: var(--text);
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover:enabled {
+        border-color: var(--accent);
+      }
+      button:focus-visible,
+      select:focus-visible,
+      input:focus-visible,
+      summary:focus-visible {
+        outline: 3px solid var(--accent);
+        outline-offset: 2px;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .primary {
+        background: var(--accent);
+        color: var(--panel);
+        border-color: var(--accent);
+      }
+      .action-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .actions .divider {
+        border-left: 1px solid var(--border);
+      }
+      .hint {
+        font-size: 0.85rem;
+        margin-top: 12px;
+      }
+      .tabs {
+        margin-bottom: 16px;
+      }
+      .tab[aria-selected="true"] {
+        background: var(--tint);
+        color: var(--accent);
+        border-color: var(--accent);
+        font-weight: 650;
+      }
+      .filters {
+        margin-top: 12px;
+      }
+      .filters label {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .status-line {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        justify-content: space-between;
+      }
+      #status {
+        overflow-wrap: anywhere;
+      }
+      #cancelBtn {
+        white-space: nowrap;
+        color: var(--red);
+      }
+      .counts {
+        font-variant-numeric: tabular-nums;
+      }
+      .table-wrap {
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        text-align: left;
+      }
+      th {
+        background: var(--tint);
+        font-size: 0.85rem;
+        white-space: nowrap;
+      }
+      td,
+      th {
+        padding: 13px 14px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+      tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      td.coords {
+        white-space: nowrap;
+        font-family: ui-monospace, monospace;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 0.75rem;
+        padding: 3px 7px;
+        border-radius: 5px;
+        background: var(--tint);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .badge.confirmed {
+        color: var(--green);
+      }
+      .badge.unverified {
+        color: var(--amber);
+      }
+      .badge.collected {
+        color: var(--muted);
+      }
+      .sub {
+        display: block;
+        font-size: 0.78rem;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      details {
+        min-width: 110px;
+        max-width: 450px;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--accent);
+      }
+      dl {
+        font-size: 0.85rem;
+        margin: 10px 0;
+      }
+      dt {
+        color: var(--muted);
+        margin-top: 8px;
+      }
+      dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 0.75rem;
+        max-height: 220px;
+        overflow: auto;
+      }
+      footer {
+        color: var(--muted);
+        font-size: 0.85rem;
+        margin-top: 18px;
+      }
+      .empty {
+        text-align: center;
+        padding: 35px;
+        color: var(--muted);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      @media (max-width: 700px) {
+        main {
+          padding: 20px 12px;
+        }
+        header {
+          align-items: flex-start;
+        }
+        h1 {
+          font-size: 1.3rem;
+        }
+        .actions .divider {
+          display: none;
+        }
+        .action-group {
+          width: 100%;
+        }
+        .action-group button {
+          flex: 1;
+        }
+        .panel {
+          padding: 13px;
+        }
+        td,
+        th {
+          padding: 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Luanti Grave Scanner</h1>
+          <p class="muted">
+            Groby w zapisanej mapie i historia zdarzeń z logów.
+          </p>
+        </div>
+        <label><input id="themeToggle" type="checkbox" /> Tryb ciemny</label>
+      </header>
+      <section class="panel" aria-label="Skanowanie">
+        <div class="actions">
+          <div class="action-group">
+            <button class="primary scan-button" id="refreshIncBtn">
+              Odśwież nowe wpisy</button
+            ><button class="scan-button" id="refreshFullBtn">
+              Pełny reskan logu
+            </button>
+          </div>
+          <span class="divider"></span>
+          <div class="action-group">
+            <button class="scan-button" id="verifyMapBtn" disabled>
+              Zweryfikuj znane groby w mapie</button
+            ><button class="scan-button" id="fullMapBtn" disabled>
+              Znajdź wszystkie groby w mapie
+            </button>
+          </div>
+        </div>
+        <p class="muted hint">
+          Każdy skan mapy najpierw odświeża log. Pełne wyszukiwanie sprawdza
+          również znane groby. Wszystkie operacje uruchamiasz ręcznie.
+        </p>
+        <p id="mapNotice" class="muted hint" hidden>
+          Skan mapy jest niedostępny. Skonfiguruj źródło mapy na serwerze
+          aplikacji.
+        </p>
+      </section>
+      <section class="panel" aria-label="Stan operacji">
+        <div class="status-line">
+          <p id="status" role="status" aria-live="polite">Ładowanie danych…</p>
+          <button id="cancelBtn" hidden>Anuluj skan mapy</button>
+        </div>
+        <p id="lastScan" class="muted hint"></p>
+      </section>
+      <section class="panel" aria-label="Widoki i filtry">
+        <div class="tabs" role="tablist" aria-label="Widok grobów">
+          <button
+            class="tab"
+            role="tab"
+            id="viewConfirmed"
+            data-view="confirmed"
+            aria-selected="true"
+          >
+            Istniejące — potwierdzone w mapie
+          </button>
+          <button
+            class="tab"
+            role="tab"
+            id="viewUnverified"
+            data-view="unverified"
+            aria-selected="false"
+          >
+            Do weryfikacji
+          </button>
+          <button
+            class="tab"
+            role="tab"
+            id="viewHistory"
+            data-view="history"
+            aria-selected="false"
+          >
+            Historia
+          </button>
+        </div>
+        <p id="counts" class="muted counts"></p>
+        <div class="filters">
+          <label
+            >Nick:
+            <select id="playerFilter">
+              <option value="all">wszyscy</option>
+            </select></label
+          >
+          <label
+            >Zakres czasu:
+            <select id="timeRange">
+              <option value="all">wszystko</option>
+              <option value="today">dziś</option>
+              <option value="week">ostatnie 7 dni</option>
+              <option value="month">ostatnie 30 dni</option>
+            </select></label
+          >
+          <label
+            >Sortowanie:
+            <select id="sortOrder">
+              <option value="date">data grobu — najnowsze</option>
+              <option value="discovery">ostatnio odkryte</option>
+            </select></label
+          >
+        </div>
+        <p class="muted hint">
+          Bez daty utworzenia z logu używana jest data pierwszego wykrycia w
+          mapie. Ponowne skany jej nie przesuwają.
+        </p>
+      </section>
+      <p id="visibleCount" class="muted hint"></p>
+      <div class="table-wrap">
+        <table aria-label="Lista grobów">
+          <thead>
+            <tr>
+              <th>Data</th>
+              <th>Gracz</th>
+              <th>Współrzędne (x, y, z)</th>
+              <th>Stan</th>
+              <th>Źródła</th>
+              <th>Ostatnia weryfikacja</th>
+              <th>Szczegóły</th>
+            </tr>
+          </thead>
+          <tbody id="rows">
+            <tr>
+              <td class="empty" colspan="7">Ładowanie…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <footer>
+        Wersja aplikacji: <strong id="version">…</strong> · Obecność dotyczy
+        stanu zapisanego w mapie podczas ostatniego sprawdzenia.
+      </footer>
+    </main>
+    <script>
+      "use strict";
+      const byId = (id) => document.getElementById(id);
+      const keys = {
+        theme: "graveScanner.theme",
+        range: "graveScanner.range",
+        player: "graveScanner.player",
+        view: "graveScanner.view",
+        sort: "graveScanner.sort",
+      };
+      const escapeHtml = (value) =>
+        String(value ?? "").replace(
+          /[&<>"']/g,
+          (ch) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[ch],
+        );
+      const fmtTs = (value) => {
+        if (!value) return "—";
+        const d = new Date(value);
+        return Number.isNaN(+d) ? "—" : d.toLocaleString("pl-PL");
+      };
+      const safeGet = (key) => {
+        try {
+          return localStorage.getItem(key);
+        } catch {
+          return null;
+        }
+      };
+      const safeSet = (key, value) => {
+        try {
+          localStorage.setItem(key, value);
+        } catch {}
+      };
+      let allEvents = [],
+        view = "confirmed",
+        localBusy = false,
+        mapEnabled = false,
+        currentJob = null,
+        pollTimer = null,
+        playersInitialized = false;
+      function setStatus(message) {
+        byId("status").textContent = message;
+      }
+      function controls(busy) {
+        document.querySelectorAll(".scan-button").forEach((button) => {
+          button.disabled =
+            busy ||
+            (!mapEnabled && ["verifyMapBtn", "fullMapBtn"].includes(button.id));
+        });
+        byId("cancelBtn").hidden = !(
+          currentJob && currentJob.state === "running"
+        );
+      }
+      async function request(url, options = {}) {
+        const response = await fetch(url, { cache: "no-store", ...options });
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          throw new Error(
+            "Nieprawidłowa odpowiedź serwera (HTTP " + response.status + ").",
+          );
+        }
+        if (!response.ok)
+          throw new Error(data.error || "HTTP " + response.status);
+        return data;
+      }
+      function withinRange(value, range) {
+        if (range === "all") return true;
+        const date = new Date(value),
+          now = new Date();
+        if (Number.isNaN(+date)) return false;
+        if (range === "today")
+          return date.toDateString() === now.toDateString();
+        const diff = now - date;
+        return diff >= 0 && diff <= (range === "week" ? 7 : 30) * 86400000;
+      }
+      function rebuildPlayers() {
+        let previous = playersInitialized
+          ? byId("playerFilter").value
+          : safeGet(keys.player) || "all";
+        playersInitialized = true;
+        if (
+          !["all", "unknown"].includes(previous) &&
+          !previous.startsWith("p:")
+        )
+          previous = "p:" + previous;
+        const players = [...new Set(allEvents.map((g) => g.player || ""))].sort(
+          (a, b) => a.localeCompare(b, "pl"),
+        );
+        byId("playerFilter").innerHTML =
+          '<option value="all">wszyscy</option>' +
+          players
+            .map(
+              (player) =>
+                `<option value="${player ? "p:" + escapeHtml(player) : "unknown"}">${escapeHtml(player || "Nieznany")}</option>`,
+            )
+            .join("");
+        if (
+          [...byId("playerFilter").options].some(
+            (option) => option.value === previous,
+          )
+        )
+          byId("playerFilter").value = previous;
+      }
+      const statusNames = {
+        confirmed: "Potwierdzony w mapie",
+        unverified: "Do weryfikacji",
+        collected: "Podniesiony",
+      };
+      function renderTable() {
+        document.querySelectorAll("[data-view]").forEach((button) => {
+          button.setAttribute(
+            "aria-selected",
+            String(button.dataset.view === view),
+          );
+          button.tabIndex = button.dataset.view === view ? 0 : -1;
+        });
+        const counts = { confirmed: 0, unverified: 0, collected: 0 };
+        allEvents.forEach((g) => counts[g.status]++);
+        byId("viewConfirmed").textContent =
+          `Istniejące — potwierdzone w mapie (${counts.confirmed})`;
+        byId("viewUnverified").textContent =
+          `Do weryfikacji (${counts.unverified})`;
+        byId("viewHistory").textContent = `Historia (${allEvents.length})`;
+        byId("counts").textContent =
+          `Potwierdzone: ${counts.confirmed} · Do weryfikacji: ${counts.unverified} · Podniesione: ${counts.collected}`;
+        const player = byId("playerFilter").value,
+          range = byId("timeRange").value,
+          sort = byId("sortOrder").value;
+        const filtered = allEvents.filter(
+          (g) =>
+            (view === "history" || g.status === view) &&
+            (player === "all" ||
+              (player === "unknown"
+                ? !g.player
+                : "p:" + g.player === player)) &&
+            withinRange(g.timestamp, range),
+        );
+        filtered.sort(
+          (a, b) =>
+            new Date(sort === "discovery" ? b.discovered_at : b.timestamp) -
+            new Date(sort === "discovery" ? a.discovered_at : a.timestamp),
+        );
+        byId("visibleCount").textContent =
+          `Wyświetlane rekordy: ${filtered.length}`;
+        if (!filtered.length) {
+          byId("rows").innerHTML =
+            '<tr><td class="empty" colspan="7">Brak grobów dla wybranego widoku i filtrów.' +
+            (view === "confirmed"
+              ? " Odśwież log, a następnie uruchom weryfikację lub pełne wyszukiwanie w mapie."
+              : "") +
+            "</td></tr>";
+          return;
+        }
+        byId("rows").innerHTML = filtered
+          .map((g) => {
+            const source =
+              g.removal_source === "log"
+                ? "Odbiór z logu"
+                : g.removal_source === "map"
+                  ? "Brak stwierdzony skanem"
+                  : g.removal_source === "replacement"
+                    ? "Zastąpiony kolejnym grobem"
+                    : "";
+            const access =
+              g.map?.access === "public"
+                ? "publiczny"
+                : g.map?.access === "private"
+                  ? "chroniony"
+                  : "";
+            const details = `<dl><dt>Pierwsze wykrycie</dt><dd>${escapeHtml(fmtTs(g.discovered_at))}</dd>${g.collected ? `<dt>${escapeHtml(source)}</dt><dd>${escapeHtml(fmtTs(g.collected_at))}</dd><dt>Podniesiony przez</dt><dd>${escapeHtml(g.collected_by || "Nieustalony")}</dd>` : ""}<dt>Nick ustalony na podstawie</dt><dd>${g.owner_source === "log" ? "logu" : g.owner_source === "map" ? "metadanych mapy" : "brak danych"}</dd>${g.map ? `<dt>Blok podczas ostatniego sprawdzenia</dt><dd>${escapeHtml(g.map.node)}</dd>` : ""}</dl>${g.raw_line ? `<pre>${escapeHtml(g.raw_line)}</pre>` : ""}${g.map?.metadata ? `<details><summary>Metadane grobu</summary><pre>${escapeHtml(JSON.stringify(g.map.metadata, null, 2))}</pre></details>` : ""}`;
+            return `<tr data-grave-id="${escapeHtml(g.id)}"><td>${escapeHtml(fmtTs(g.timestamp))}<span class="sub">${g.date_source === "log" ? "z logu" : "wykryto w mapie"}</span></td><td>${escapeHtml(g.player || "Nieznany")}${access ? `<span class="sub">${access}</span>` : ""}</td><td class="coords">(${g.x}, ${g.y}, ${g.z})</td><td><span class="badge ${escapeHtml(g.status)}">${escapeHtml(statusNames[g.status] || g.status)}</span>${g.collected ? `<span class="sub">${escapeHtml(source)}</span>` : ""}</td><td>${(g.sources || []).map((s) => (s === "log" ? "Log" : "Mapa")).join(" + ") || "—"}</td><td>${g.map ? escapeHtml(fmtTs(g.map.at)) : "—"}</td><td><details><summary>Szczegóły</summary>${details}</details></td></tr>`;
+          })
+          .join("");
+      }
+      async function loadDeaths() {
+        allEvents = await request("/api/deaths");
+        rebuildPlayers();
+        renderTable();
+      }
+      function describeJob(job) {
+        const mode =
+          job.mode === "full"
+            ? "Pełne wyszukiwanie w mapie"
+            : "Weryfikacja znanych grobów";
+        const stages = {
+          logs: "odświeżanie logu",
+          map: "odczyt mapy",
+          saving: "zapisywanie wyników",
+        };
+        return `${mode}: ${stages[job.stage] || job.stage}. Bloki: ${job.blocks}, sprawdzone pozycje: ${job.checked}${job.mode === "full" ? ", znalezione groby: " + job.found : ""}.`;
+      }
+      async function refreshStatus() {
+        const info = await request("/api/status"),
+          previous = currentJob;
+        mapEnabled = info.map_enabled;
+        currentJob = info.job;
+        byId("version").textContent = info.version;
+        byId("mapNotice").hidden = mapEnabled;
+        controls(info.busy || localBusy);
+        const last = info.last_map_scan;
+        byId("lastScan").textContent = last
+          ? `Ostatni udany skan mapy: ${fmtTs(last.started_at)} — ${fmtTs(last.finished_at)}. Bloki: ${last.blocks}, sprawdzone pozycje: ${last.checked}.`
+          : "Mapa nie została jeszcze sprawdzona.";
+        if (currentJob?.state === "running") {
+          setStatus(describeJob(currentJob));
+        } else if (
+          previous?.state === "running" &&
+          currentJob?.id === previous.id
+        ) {
+          await loadDeaths();
+          setStatus(
+            currentJob.state === "succeeded"
+              ? `Zakończono. Bloki: ${currentJob.blocks}, sprawdzone pozycje: ${currentJob.checked}${currentJob.mode === "full" ? ", znalezione groby: " + currentJob.found : ""}.`
+              : currentJob.state === "cancelled"
+                ? "Skan mapy anulowany. Poprzednie wyniki mapy zostały zachowane."
+                : "Błąd skanu: " +
+                  currentJob.error +
+                  ". Poprzednie wyniki mapy zostały zachowane.",
+          );
+        }
+        clearTimeout(pollTimer);
+        if (info.busy || currentJob?.state === "running")
+          pollTimer = setTimeout(pollStatus, 800);
+        return info;
+      }
+      function pollStatus() {
+        refreshStatus().catch((error) => {
+          setStatus("Błąd odczytu postępu: " + error.message);
+          pollTimer = setTimeout(pollStatus, 2000);
+        });
+      }
+      async function refreshLog(full) {
+        localBusy = true;
+        controls(true);
+        setStatus(
+          full ? "Trwa pełny reskan logu…" : "Trwa odświeżanie nowych wpisów…",
+        );
+        try {
+          const info = await request(
+            "/api/refresh/" + (full ? "full" : "incremental"),
+            { method: "POST" },
+          );
+          await loadDeaths();
+          setStatus(
+            `Zakończono: nowe wpisy utworzenia ${info.added}, groby w historii ${info.total}.${info.replayed && !full ? " Log odczytano od początku; historia została zachowana." : ""}`,
+          );
+        } catch (error) {
+          setStatus("Błąd odświeżania: " + error.message);
+        } finally {
+          localBusy = false;
+          await refreshStatus().catch((error) => setStatus(error.message));
+        }
+      }
+      async function startMap(mode) {
+        localBusy = true;
+        controls(true);
+        setStatus(
+          mode === "full"
+            ? "Uruchamianie pełnego wyszukiwania w mapie…"
+            : "Uruchamianie weryfikacji znanych grobów…",
+        );
+        try {
+          currentJob = await request("/api/map/" + mode, { method: "POST" });
+          setStatus(describeJob(currentJob));
+        } catch (error) {
+          setStatus("Nie uruchomiono skanu: " + error.message);
+        } finally {
+          localBusy = false;
+          await refreshStatus().catch((error) => setStatus(error.message));
+        }
+      }
+      byId("refreshIncBtn").addEventListener("click", () => refreshLog(false));
+      byId("refreshFullBtn").addEventListener("click", () => refreshLog(true));
+      byId("verifyMapBtn").addEventListener("click", () => startMap("verify"));
+      byId("fullMapBtn").addEventListener("click", () => startMap("full"));
+      byId("cancelBtn").addEventListener("click", async () => {
+        if (!currentJob) return;
+        byId("cancelBtn").disabled = true;
+        try {
+          await request("/api/scan/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: currentJob.id }),
+          });
+          setStatus("Zatrzymywanie skanu mapy…");
+        } catch (error) {
+          setStatus(error.message);
+        } finally {
+          byId("cancelBtn").disabled = false;
+        }
+      });
+      document.querySelectorAll("[data-view]").forEach((button) => {
+        button.addEventListener("click", () => {
+          view = button.dataset.view;
+          safeSet(keys.view, view);
+          renderTable();
+        });
+        button.addEventListener("keydown", (event) => {
+          const tabs = [...document.querySelectorAll("[data-view]")],
+            i = tabs.indexOf(button);
+          let next;
+          if (event.key === "ArrowRight") next = tabs[(i + 1) % tabs.length];
+          if (event.key === "ArrowLeft")
+            next = tabs[(i + tabs.length - 1) % tabs.length];
+          if (event.key === "Home") next = tabs[0];
+          if (event.key === "End") next = tabs[tabs.length - 1];
+          if (next) {
+            event.preventDefault();
+            next.click();
+            next.focus();
+          }
+        });
+      });
+      byId("playerFilter").addEventListener("change", () => {
+        safeSet(keys.player, byId("playerFilter").value);
         renderTable();
       });
-    });
-
-    themeToggle.addEventListener('change', () => {
-      const theme = themeToggle.checked ? 'dark' : 'light';
-      document.body.classList.toggle('theme-dark', theme === 'dark');
-      saveTheme(theme);
-    });
-
-    loadPreferences();
-    loadDeaths().then(() => setStatus('Dane załadowane.')).catch(err => {
-      rows.innerHTML = `<tr><td colspan="4" class="muted">Błąd odczytu API: ${escapeHtml(err.message)}</td></tr>`;
-      setStatus('Błąd ładowania danych.');
-    });
-  </script>
-</body>
+      byId("timeRange").addEventListener("change", () => {
+        safeSet(keys.range, byId("timeRange").value);
+        renderTable();
+      });
+      byId("sortOrder").addEventListener("change", () => {
+        safeSet(keys.sort, byId("sortOrder").value);
+        renderTable();
+      });
+      byId("themeToggle").addEventListener("change", () => {
+        document.body.classList.toggle(
+          "theme-dark",
+          byId("themeToggle").checked,
+        );
+        safeSet(keys.theme, byId("themeToggle").checked ? "dark" : "light");
+      });
+      view = ["confirmed", "unverified", "history"].includes(safeGet(keys.view))
+        ? safeGet(keys.view)
+        : "confirmed";
+      if (["all", "today", "week", "month"].includes(safeGet(keys.range)))
+        byId("timeRange").value = safeGet(keys.range);
+      if (safeGet(keys.sort) === "discovery")
+        byId("sortOrder").value = "discovery";
+      byId("themeToggle").checked = safeGet(keys.theme) === "dark";
+      document.body.classList.toggle("theme-dark", byId("themeToggle").checked);
+      Promise.all([loadDeaths(), refreshStatus()])
+        .then(() => {
+          if (!currentJob || currentJob.state !== "running")
+            setStatus("Dane załadowane. Wybierz operację skanowania.");
+        })
+        .catch((error) => {
+          setStatus("Błąd ładowania: " + error.message);
+          byId("rows").innerHTML =
+            '<tr><td class="empty" colspan="7">Nie udało się załadować danych.</td></tr>';
+        });
+    </script>
+  </body>
 </html>

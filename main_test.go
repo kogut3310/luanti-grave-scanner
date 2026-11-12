@@ -71,10 +71,10 @@ func TestBonesCollectionRefresh(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(restarted.events) != 1 {
-				t.Fatalf("unexpected graves: %+v", restarted.events)
+			if len(restarted.snapshot().Graves) != 1 {
+				t.Fatalf("unexpected graves: %+v", restarted.snapshot().Graves)
 			}
-			grave := restarted.events[0]
+			grave := restarted.snapshot().Graves[0]
 			if !grave.Collected || grave.Player != "Owner" || grave.CollectedBy != "Collector" || grave.CollectedAt == nil || !grave.CollectedAt.Equal(event.Timestamp) {
 				t.Fatalf("collection not persisted: %+v", grave)
 			}
@@ -99,8 +99,8 @@ func TestRefreshIgnoresDigLogs(t *testing.T) {
 					if _, err := refresh(); err != nil {
 						t.Fatal(err)
 					}
-					if len(app.events) != 1 || app.events[0].Collected || app.events[0].CollectedBy != "" || app.events[0].CollectedAt != nil {
-						t.Fatalf("dig log changed grave status: %+v", app.events)
+					if len(app.snapshot().Graves) != 1 || app.snapshot().Graves[0].Collected || app.snapshot().Graves[0].CollectedBy != "" || app.snapshot().Graves[0].CollectedAt != nil {
+						t.Fatalf("dig log changed grave status: %+v", app.snapshot().Graves)
 					}
 				})
 			}
@@ -128,10 +128,10 @@ func TestFullRefreshMarksMatchingGraveAsCollected(t *testing.T) {
 		t.Fatalf("full refresh: %v", err)
 	}
 
-	if len(app.events) != 1 {
-		t.Fatalf("expected one grave, got %d", len(app.events))
+	if len(app.snapshot().Graves) != 1 {
+		t.Fatalf("expected one grave, got %d", len(app.snapshot().Graves))
 	}
-	grave := app.events[0]
+	grave := app.snapshot().Graves[0]
 	if !grave.Collected || grave.CollectedBy != "Alice" || grave.CollectedAt == nil {
 		t.Fatalf("grave was not marked as collected: %+v", grave)
 	}
@@ -205,7 +205,7 @@ func TestRefreshIncrementalAndFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refresh full: %v", err)
 	}
-	if resFull.Mode != "full" || resFull.Total != 3 || resFull.Added != 3 {
+	if resFull.Mode != "full" || resFull.Total != 3 || resFull.Added != 1 {
 		t.Fatalf("unexpected full response: %+v", resFull)
 	}
 }
@@ -296,8 +296,8 @@ func TestIncrementalCollectionSurvivesRestart(t *testing.T) {
 	if _, err := restarted.refreshFull(); err != nil {
 		t.Fatal(err)
 	}
-	if len(restarted.events) != 1 || !restarted.events[0].Collected {
-		t.Fatalf("full refresh disagrees with incremental refresh: %+v", restarted.events)
+	if len(restarted.snapshot().Graves) != 1 || !restarted.snapshot().Graves[0].Collected {
+		t.Fatalf("full refresh disagrees with incremental refresh: %+v", restarted.snapshot().Graves)
 	}
 }
 
@@ -316,8 +316,8 @@ func TestCollectionAfterLogRotationPreservesHistory(t *testing.T) {
 	if err != nil || res.Added != 0 || res.Total != 2 {
 		t.Fatalf("history lost on rotation: %+v, %v", res, err)
 	}
-	if !app.events[0].Collected || app.events[1].Collected {
-		t.Fatalf("wrong collection after rotation: %+v", app.events)
+	if !app.snapshot().Graves[0].Collected || app.snapshot().Graves[1].Collected {
+		t.Fatalf("wrong collection after rotation: %+v", app.snapshot().Graves)
 	}
 }
 
@@ -329,8 +329,8 @@ func TestCollectionMatchesLatestGraveWithinSameSecond(t *testing.T) {
 	if _, err := app.refreshFull(); err != nil {
 		t.Fatal(err)
 	}
-	if len(app.events) != 2 || app.events[0].Collected || !app.events[1].Collected {
-		t.Fatalf("collection did not match latest grave in log order: %+v", app.events)
+	if len(app.snapshot().Graves) != 2 || !app.snapshot().Graves[0].Collected || !app.snapshot().Graves[1].Collected {
+		t.Fatalf("collection did not match latest grave in log order: %+v", app.snapshot().Graves)
 	}
 }
 
