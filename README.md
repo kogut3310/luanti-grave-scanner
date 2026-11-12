@@ -122,6 +122,11 @@ podać przez `IMAGE_NAME=twoja-nazwa ./scripts/build-image.sh`. Dodatkowe argume
 Docker, np. `--no-cache`, są przekazywane przez skrypt. Sama aplikacja i UI
 odczytują wersję osadzoną z `VERSION`.
 
+Domyślny Dockerfile działa ze starszym builderem Dockera oraz z BuildKit;
+instalacja buildx nie jest wymagana. Ostrzeżenie o wycofywaniu legacy buildera
+nie przerywa budowania. Tag `luanti-grave-scanner:v0.3` powstaje dopiero po
+poprawnym zakończeniu całego procesu, a nie po samym pobraniu obrazu `golang`.
+
 ```sh
 docker run -d \
   --name luanti-grave-scanner \
